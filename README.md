@@ -31,6 +31,9 @@ sudo bash protectemmc.sh --apply --edge --remove-disk-swap
 | `fstrim.timer` | 保持现状 | 阻止定时任务启动，重启生效 |
 | man-db 自动更新 | 保持现状 | 跳过 service 和已有 daily/weekly cron 脚本；手动 mandb 仍可用 |
 | systemd-timesyncd | 保持时间持久化 | 时间状态使用内存，继续网络校时，重启生效 |
+| fake-hwclock | 保持现状 | 已知脚本的 save 入口提前退出，覆盖定时和关机保存，保留 load |
+| core dump | 保持现状 | 禁止 systemd-coredump 存储和处理；重启后内核不再交给原崩溃收集器 |
+| APT 缓存 | 保持现状 | 不生成持久二进制索引缓存、不保留下载包；保留软件源列表和自动更新 |
 | Armbian ramlog | 保持现状 | 在识别的同步入口加入 `return 0`，保留内存日志挂载 |
 | `/tmp` | 仅 `--tmp-size` 开启 | 相同 |
 | Docker | 仅 `--docker-journald` 开启 | 相同 |
@@ -55,7 +58,17 @@ Docker 配置按 JSON 合并，保留存储、网络等其他配置；切换驱�
 
 `/tmp` 的大小是上限，并非预先分配；请给业务、软件安装和解压预留内存。已有 tmpfs 挂载选项会保留，只调整大小；其他文件系统的 `/tmp` 不会被覆盖。`/var/tmp` 保留跨重启语义。存在磁盘 swap 时，tmpfs 仍可能经 swap 写盘。基础模式只报告 swap；只有显式指定 `--remove-disk-swap` 才会尝试迁移和删除。
 
-极端模式只改变 timesyncd 的时间状态，不禁用网络校时。没有 RTC 的设备冷启动时间可能回退，网络校时成功后恢复。fake-hwclock、chrony、ntpd 有各自的持久化机制，需要按实际安装情况检查。
+极端模式将 timesyncd 状态放入内存，并在已识别的 fake-hwclock 脚本 save 入口加入 `exit 0`，覆盖无参数保存、定时保存及关机保存；保留 load 和已有时间文件，不禁用网络校时。没有 RTC 的设备冷启动时间可能回退，网络校时成功后恢复。未知 fake-hwclock 脚本结构拒绝修改，发行版升级后需重新预演核验。chrony、ntpd 有各自的持久化机制，仍需按实际配置检查。
+
+## 崩溃转储、缓存与应用写入
+
+`--edge` 配置 `Storage=none` 和 `ProcessSizeMax=0`，使 systemd-coredump 不存储或处理进程内存转储；再用独立 sysctl 配置将 `kernel.core_pattern` 设为 `|/bin/false`，重启后也不再调用其他崩溃收集器。不会在线加载全系统 sysctl 或删除现有转储。普通 journal 错误日志仍保留，但无法依赖新的 core 文件调试崩溃。恢复 sysctl 配置同样需要重启；其他优先级更高的配置可能覆盖设置，巡检会报告当前 core handler。
+
+检测到 APT 时，独立配置关闭持久 `pkgcache/srcpkgcache` 并关闭 apt/apt-get 的下载包保留。不会清空缓存目录，不将软件包目录挂到 tmpfs，也不禁用安全更新。下载、解压、软件源列表、dpkg 数据库和安装日志仍有必要写入。缓存不保留可能增加后续重复下载及索引解析开销。
+
+`--check` 增加只读写入源巡检：fake-hwclock、core handler、APT 更新定时器、Docker/Redis/MariaDB/PostgreSQL/nginx 等服务、常见缓存与数据目录实际挂载，以及内核脏页参数。只显示配置路径和建议，不输出配置中的密码，不递归扫描数据库和缓存目录。
+
+应用数据需按业务语义处理：可丢失的应用缓存可单独放入受容量限制的 tmpfs；数据库可考虑应用端批量提交、减少无用查询日志、迁移到独立存储。脚本不自动关闭数据库 fsync、Redis 持久化或统一改大脏页回写周期，避免把必要的业务数据当作缓存丢弃。
 
 ## zram 与磁盘 swap 迁移
 
@@ -89,6 +102,9 @@ bash -n protectemmc.sh
 bash tests/test_protectemmc.sh
 bash tests/test_edge_settings.sh
 bash tests/test_zram_settings.sh
+bash tests/test_background_settings.sh
+bash tests/test_fake_clock_settings.sh
+bash tests/test_write_audit.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 

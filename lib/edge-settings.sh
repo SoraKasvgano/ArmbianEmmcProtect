@@ -68,6 +68,6 @@ EOF
         info '未发现可加载的 man-db.service，跳过手册索引服务配置'
     fi
     info 'edge 配置在重启后生效；现有 timesyncd 和 fstrim.timer 运行状态尚未改变'
-    warn '此配置只处理 timesyncd、fstrim.timer 和 man-db.service；fake-hwclock、chrony、NTP 及其他 cron 定时任务需另行检查'
+    warn 'chrony、其他 NTP 实现及自定义 cron 仍需按实际配置检查'
     return 0
 }

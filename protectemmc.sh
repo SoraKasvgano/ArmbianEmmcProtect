@@ -32,7 +32,7 @@ usage() {
 用法：sudo bash protectemmc.sh [选项]
   --check              只读巡检（默认，无需 root）
   --apply              设置 journald 为限额内存日志，关闭向 syslog 转发
-  --edge               极端减写入：noatime、禁 TRIM/man-db 任务、timesyncd 状态内存化、ramlog 禁同步
+  --edge               极端减写入：noatime、禁 TRIM/man-db、时间及日志禁回写、禁 core dump、减少 APT 缓存
   --dry-run            与 --apply / --restore 配合，仅预演，不修改配置
   --noatime            同时修改 fstab 中明确的根分区条目，重启生效
   --tmp-size SIZE      同时将 /tmp 配为 tmpfs，例如 64M、128M，重启生效
@@ -152,8 +152,12 @@ scan_system() {
             warn 'Armbian ramlog 未检测到补丁，可能将内存日志同步到介质'
         fi
     fi
-    if [[ -f /etc/cron.hourly/fake-hwclock ]] || command -v fake-hwclock >/dev/null 2>&1; then
-        warn '检测到 fake-hwclock：其持久化独立于 timesyncd，请检查发行版的保存任务'
+    if [[ -f $SCRIPT_DIR/lib/write-audit.sh ]]; then
+        # shellcheck source=lib/write-audit.sh
+        source "$SCRIPT_DIR/lib/write-audit.sh"
+        scan_write_sources
+    else
+        warn '缺少 lib/write-audit.sh，跳过附加写入源巡检'
     fi
 }
 
@@ -163,6 +167,9 @@ allowed_path() {
         /etc/systemd/system/systemd-timesyncd.service.d/99-emmc-protect.conf|\
         /etc/systemd/system/fstrim.timer.d/99-emmc-protect.conf|\
         /etc/systemd/system/man-db.service.d/99-emmc-protect.conf|\
+        /etc/systemd/coredump.conf.d/99-emmc-protect.conf|\
+        /etc/sysctl.d/99-emmc-protect-coredump.conf|/etc/apt/apt.conf.d/99-emmc-protect-cache|\
+        /sbin/fake-hwclock|/usr/sbin/fake-hwclock|\
         /etc/cron.daily/man-db|/etc/cron.weekly/man-db|\
         /etc/default/armbian-zram-config|/etc/modules-load.d/dietpi-zram-swap.conf|\
         /etc/udev/rules.d/98-dietpi-zram-swap.rules|/etc/sysctl.d/98-dietpi-zram-swap.conf|\
@@ -301,10 +308,16 @@ PY
         CHANGED+=("$DOCKER_CONF")
     fi
     if ((EDGE)); then
-        [[ -f $SCRIPT_DIR/lib/edge-settings.sh && -f $SCRIPT_DIR/lib/ramlog-protect.py ]] || die '缺少 lib 辅助文件，请保留完整仓库目录'
+        [[ -f $SCRIPT_DIR/lib/edge-settings.sh && -f $SCRIPT_DIR/lib/ramlog-protect.py && -f $SCRIPT_DIR/lib/background-settings.sh && -f $SCRIPT_DIR/lib/fake-clock-settings.sh ]] || die '缺少 lib 辅助文件，请保留完整仓库目录'
         # shellcheck source=lib/edge-settings.sh
         source "$SCRIPT_DIR/lib/edge-settings.sh"
         prepare_edge_settings
+        # shellcheck source=lib/background-settings.sh
+        source "$SCRIPT_DIR/lib/background-settings.sh"
+        prepare_background_settings
+        # shellcheck source=lib/fake-clock-settings.sh
+        source "$SCRIPT_DIR/lib/fake-clock-settings.sh"
+        prepare_fake_clock_settings
         stage_man_db_cron /etc/cron.daily/man-db
         stage_man_db_cron /etc/cron.weekly/man-db
         if [[ -f $RAMLOG_SCRIPT ]]; then
@@ -414,7 +427,9 @@ manage_swap() {
 # Same-directory rename prevents readers from observing partially written files.
 atomic_copy() {
     local source=$1 target=$2 tmp
-    mkdir -p -- "$(dirname "$target")" || return 1
+    # New configuration directories must also be readable by unprivileged
+    # helpers such as systemd-coredump; do not chmod existing directories.
+    (umask 022; mkdir -p -- "$(dirname "$target")") || return 1
     tmp=$(mktemp "$(dirname "$target")/.emmc-protect.XXXXXX") || return 1
     if ! cp -p -- "$source" "$tmp" || ! mv -f -- "$tmp" "$target"; then
         rm -f -- "$tmp"
